@@ -1,1 +1,1 @@
-# jsfinder
+# Burp Extension JSFinder
