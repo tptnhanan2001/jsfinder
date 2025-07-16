@@ -27,6 +27,21 @@ class Run(Runnable):
     def run(self):
         self.runner()
 
+# Needed params
+sensitive_keywords = [
+    "admin", "auth", "login", "register", "token", "secret", "session", "config", 
+    "password", "jwt", "apikey", "key", "debug", "user", "account", "private"
+]
+
+sensitive_response_patterns = [
+    r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",       # Email
+    r"Bearer\s+[A-Za-z0-9\-._~+/]+=*",                      # Bearer Token
+    r"eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+",    # JWT
+    r"(?i)password\s*[:=]\s*['\"]?.{4,30}['\"]?",            # Password field
+    r"(?i)access[_-]?token\s*[:=]\s*['\"]?.+?['\"]?",        # Access token
+    r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\b",      # Credit card
+]
+
 
 JSExclusionList = ['jquery', 'google-analytics','gpt.js']
 
@@ -35,21 +50,28 @@ class BurpExtender(IBurpExtender, IScannerCheck, ITab):
         from java.net import URL as JavaURL
         import re
 
+        BLACKLIST_EXT = [
+            ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico",
+            ".mp4", ".avi", ".mov", ".mkv", ".webm",
+            ".woff", ".ttf", ".eot", ".otf",
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"
+        ]
+
         sensitive_keywords = [
             "admin", "auth", "login", "register", "token", "secret", "session", "config",
-            "password", "jwt", "apikey", "key", "debug", "user", "account", "private"
+            "password", "jwt", "apikey", "key", "debug", "user", "account", "private","api","api/v1","api/v2","api/v3","apikey","access","access_token"
         ]
 
         sensitive_response_patterns = [
             r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",        # Email
             r"Bearer\s+[A-Za-z0-9\-._~+/]+=*",                        # Bearer Token
             r"eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+",     # JWT
-            r"(?i)password\s*[:=]\s*['\"]?.{4,30}['\"]?",             # Password field
-            r"(?i)access[_-]?token\s*[:=]\s*['\"]?.+?['\"]?",         # Access token
-            r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\b",       # Credit card
+            r"(?i)password\s*[:=]\s*['\"]?.{4,30}['\"]?",         # Password
+            r"(?i)access[_-]?token\s*[:=]\s*['\"]?.+?['\"]?",     # Access token
+            r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\b",      # Credit card
         ]
 
-        # Select domain in-scope
+        # Collecttion scope domains
         scope_domains = set()
         try:
             for item in self.callbacks.getSiteMap(None):
@@ -67,27 +89,30 @@ class BurpExtender(IBurpExtender, IScannerCheck, ITab):
             self.outputTxtArea.append(u"\n[!] Failed to collect scope domains: {}".format(unicode(str(e), 'utf-8', 'ignore')))
             return
 
-        # Extract endpoint
         for item in extracted_links:
-            path = item["link"]
+            path = item["link"].strip()
 
-            for (protocol, host, port) in scope_domains:
-                port = port if port != -1 else (443 if protocol == "https" else 80)
+            # Skip static assets
+            if any(path.lower().endswith(ext) for ext in BLACKLIST_EXT):
+                self.outputTxtArea.append(u"\n\t[-] Skipping static asset: {}".format(path))
+                continue
 
+            #  If the path starts with http:// or https://
+            if path.startswith("http://") or path.startswith("https://"):
                 try:
-                    # Build full URL
-                    if path.startswith("http://") or path.startswith("https://"):
-                        full_url = path
-                    elif path.startswith("//"):
-                        full_url = protocol + ":" + path
-                    elif path.startswith("/"):
-                        full_url = protocol + "://" + host + path
-                    else:
-                        full_url = protocol + "://" + host + "/" + path
+                    path = path.rstrip("\\")
+                    java_url = JavaURL(path)
+                    if not self.callbacks.isInScope(java_url):
+                        self.outputTxtArea.append(u"\n\t[-] Skipping out-of-scope URL: {}".format(path))
+                        continue
 
-                    self.outputTxtArea.append(u"\n\t[>] Trying on domain: {} → {}".format(host, path))
+                    self.outputTxtArea.append(u"\n\t[>] Sending full URL in-scope: {}".format(path))
 
-                    request = self.helpers.buildHttpRequest(JavaURL(full_url))
+                    host = java_url.getHost()
+                    protocol = java_url.getProtocol()
+                    port = java_url.getPort() if java_url.getPort() != -1 else (443 if protocol == "https" else 80)
+
+                    request = self.helpers.buildHttpRequest(java_url)
                     service = self.helpers.buildHttpService(host, port, protocol)
                     response = self.callbacks.makeHttpRequest(service, request)
 
@@ -95,22 +120,60 @@ class BurpExtender(IBurpExtender, IScannerCheck, ITab):
                     status_code = analyzed_response.getStatusCode()
                     self.outputTxtArea.append(u" [Status: {}]".format(status_code))
 
-   
+                    response_bytes = response.getResponse()
+                    response_str_raw = self.helpers.bytesToString(response_bytes)
+                    response_str = response_str_raw if isinstance(response_str_raw, unicode) else response_str_raw.decode('utf-8', 'ignore')
+
                     if any(key in path.lower() for key in sensitive_keywords):
                         self.outputTxtArea.append(u"\n\t[!!] Sensitive-looking endpoint: {}".format(path))
 
-                    try:
-                        response_bytes = response.getResponse()
-                        response_str_raw = self.helpers.bytesToString(response_bytes)
-                        if isinstance(response_str_raw, unicode):
-                            response_str = response_str_raw
-                        else:
-                            response_str = response_str_raw.decode('utf-8', 'ignore')
-                    except Exception as e:
-                        self.outputTxtArea.append(u"\n\t[-] Error decoding response: {}".format(unicode(str(e), 'utf-8', 'ignore')))
+                    for pattern in sensitive_response_patterns:
+                        match = re.search(pattern, response_str)
+                        if match:
+                            self.outputTxtArea.append(u"\n\t[⚠️] Sensitive data in response to: {}".format(path))
+                            self.outputTxtArea.append(u"\n\t     --> {}".format(match.group(0)))
+                            break
+
+                except Exception as e:
+                    self.outputTxtArea.append(u"\n\t[-] Error sending full URL: {} - {}".format(path, unicode(str(e), 'utf-8', 'ignore')))
+                continue
+
+            # If path => trying with all in-scope domains
+            for (protocol, host, port) in scope_domains:
+                port = port if port != -1 else (443 if protocol == "https" else 80)
+
+                try:
+                    if path.startswith("//"):
+                        full_url = protocol + ":" + path
+                    elif path.startswith("/"):
+                        full_url = protocol + "://" + host + path
+                    else:
+                        full_url = protocol + "://" + host + "/" + path
+
+                    full_url = full_url.strip().rstrip("\\")
+
+                    java_url = JavaURL(full_url)
+                    if not self.callbacks.isInScope(java_url):
+                        self.outputTxtArea.append(u"\n\t[-] Skipping out-of-scope path on domain: {}".format(full_url))
                         continue
 
-                    # Analyze sensitive content
+                    self.outputTxtArea.append(u"\n\t[>] Trying path on domain: {} → {}".format(host, path))
+
+                    request = self.helpers.buildHttpRequest(java_url)
+                    service = self.helpers.buildHttpService(host, port, protocol)
+                    response = self.callbacks.makeHttpRequest(service, request)
+
+                    analyzed_response = self.helpers.analyzeResponse(response.getResponse())
+                    status_code = analyzed_response.getStatusCode()
+                    self.outputTxtArea.append(u" [Status: {}]".format(status_code))
+
+                    response_bytes = response.getResponse()
+                    response_str_raw = self.helpers.bytesToString(response_bytes)
+                    response_str = response_str_raw if isinstance(response_str_raw, unicode) else response_str_raw.decode('utf-8', 'ignore')
+
+                    if any(key in path.lower() for key in sensitive_keywords):
+                        self.outputTxtArea.append(u"\n\t[!!] Sensitive-looking endpoint: {}".format(path))
+
                     for pattern in sensitive_response_patterns:
                         match = re.search(pattern, response_str)
                         if match:
@@ -224,7 +287,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, ITab):
                     issueText = linkA.analyseURL()
 
                     for counter, issue in enumerate(issueText):
-                        self.outputTxtArea.append("\n" + "\t" + str(counter) + ' - ' + issue['link'])
+                        self.outputTxtArea.append("\n"+ str(counter) + ' - ' + issue['link'])
 
                     self.send_request_to_extracted_links(str(urlReq), issueText)
 
