@@ -17,3 +17,4 @@
 
 - ✅ Log chi tiết kết quả: status, endpoint nhạy cảm, response nhạy cảm.
 
+=> Upgrade from JSLinkfinder
